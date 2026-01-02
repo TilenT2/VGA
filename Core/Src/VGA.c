@@ -52,3 +52,13 @@ void fastCopy160(uint8_t *dst, const uint8_t *src) {
 		*dst32++ = *src32++;
 	}
 }
+
+
+
+/*
+ *
+ * vova is a derg
+ *
+ *
+ *
+ */
