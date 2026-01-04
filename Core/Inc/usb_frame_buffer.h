@@ -11,18 +11,20 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+//from VGA.h
+#define VRES 120                       // Vertical resolution
+#define HRES 160                       // Horizontal resolution
+
 // Protocol commands
-#define CMD_FRAME_START  0xF0  // Host signals: new frame starting
+#define CMD_IDLE         0xF0    // Host signals: idle/no action
 #define CMD_DATA_CHUNK   0xF1  // Host signals: data chunk follows
-#define CMD_FRAME_END    0xF2  // Host signals: frame complete
+#define CMD_FRAME_END    0xF2  // STM32 signals: frame complete
 #define CMD_REQUEST_DATA 0xA0  // STM32 requests: send more data
 
 
-#define RING_BUFFER_LINES 20          // Number of lines to buffer (20 × 160 = 3.2KB)
-#define LINE_WIDTH 160                // Horizontal resolution
-#define RING_BUFFER_SIZE (RING_BUFFER_LINES * LINE_WIDTH)  // Total buffer size
-
-#define REQUEST_THRESHOLD 5           // Request when < 5 lines remain
+#define ITEM_SIZE HRES                // Horizontal resolution
+#define WRITE_CHUNK 480               // USB write chunk size
+#define RING_BUFFER_SIZE ((VRES*HRES)/4)  // Total buffer size 4,800
 
 
 // Frame state machine states
@@ -38,34 +40,30 @@ typedef struct {
     uint16_t write_pos;               // Where USB writes next byte (0 to RING_BUFFER_SIZE-1)
     uint16_t read_pos;                // Where VGA reads next byte (0 to RING_BUFFER_SIZE-1)
     uint16_t available_bytes;         // How many bytes are ready to read
-    bool request_pending;             // True if we've already requested more data
 } RingBuffer_t;
 
 
 typedef struct {
     FrameState_t state;               // Current frame reception state
-    uint16_t current_display_line;    // Which line of the frame VGA is currently displaying (0-119)
-    bool line_was_read; 			  // True if we successfully read the current line
     uint16_t received_bytes;          // Total bytes received in current frame
     uint32_t frame_counter;           // Total frames received (for debugging)
+    uint16_t processed_bytes;	      // Total bytes processed by VGA
 } FrameManager_t;
 
 
 
-// Global instances //not sure i understand why
+// Global instances
 extern RingBuffer_t ring_buffer;
 extern FrameManager_t frame_manager;
 
-// Initialization
+extern void fastCopy160(uint8_t *dst, const uint8_t *src);
+
 void USB_FrameBuffer_Init(void);
-
-// USB receive handling (call from CDC_Receive_FS callback)
 void USB_ProcessReceivedData(uint8_t* buf, uint32_t len);
+void SendCommands(uint8_t cmd);
+void RingBuffer_Write( uint8_t* data, uint16_t len);
+void RingBuffer_Read(uint8_t* output);
 
-// VGA read interface (call from PrepareLineBuffer)
-bool USB_GetLine(uint8_t line_number, uint8_t* output_buffer);
 
-// Buffer status (for debugging)
-uint16_t USB_GetAvailableLines(void);
 
 #endif /* INC_USB_FRAME_BUFFER_H_ */

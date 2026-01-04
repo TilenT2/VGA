@@ -25,7 +25,6 @@
 
 
 extern void VGA_Init();
-extern void prepareLineBuffer(const uint8_t* imageData, uint8_t imageWidth, uint8_t imageHeight);
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -108,6 +107,7 @@ int main(void)
 
   HAL_TIM_Base_Start(&htim1);
   HAL_TIM_Base_Start_IT(&htim2);
+  HAL_TIM_Base_Start_IT(&htim3);
 
   HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
@@ -122,8 +122,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-
-
+	  USBTest_Function();
 
 
     /* USER CODE END WHILE */

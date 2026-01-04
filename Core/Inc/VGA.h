@@ -10,10 +10,10 @@
 
 #include <string.h>
 #include "main.h"
-#include "image.h"
 #include "usb_frame_buffer.h"
 
 extern DMA_HandleTypeDef hdma_tim1_up;
+extern TIM_HandleTypeDef htim3;
 extern TIM_HandleTypeDef htim2;
 extern TIM_HandleTypeDef htim1;
 

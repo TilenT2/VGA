@@ -11,7 +11,6 @@
 #include "usbd_cdc_if.h"
 #include <string.h>
 
-
 // Global instances
 RingBuffer_t ring_buffer;
 FrameManager_t frame_manager;
@@ -23,8 +22,6 @@ void USB_FrameBuffer_Init(void) {
 
     // Initialize frame manager
     frame_manager.state = FRAME_STATE_IDLE;
-    frame_manager.current_display_line = 0;
-    frame_manager.line_was_read = false;
     frame_manager.received_bytes = 0;
     frame_manager.frame_counter = 0;
 }
@@ -35,68 +32,43 @@ void USB_FrameBuffer_Init(void) {
  * Send a request to host for more data
  * Uses USB CDC to send single command byte
  */
-static void SendDataRequest(void) {
-    uint8_t cmd = CMD_REQUEST_DATA;
-
+void SendCommands(uint8_t cmd) {
     // Only send if we haven't already requested
-    if (!ring_buffer.request_pending) {
         CDC_Transmit_FS(&cmd, 1);
-        ring_buffer.request_pending = true;
-    }
-}
-
-/**
- * Check if we need to request more data
- */
-static void CheckAndRequestData(void) {
-    if (frame_manager.state != FRAME_STATE_RECEIVING) {
-        return;  // Don't request if not receiving
     }
 
-    uint16_t available_lines = ring_buffer.available_bytes / LINE_WIDTH;
-
-    // Request more data if buffer is running low
-    if (available_lines < REQUEST_THRESHOLD && !ring_buffer.request_pending) {
-        SendDataRequest();
-    }
-
-}
 
 
 
 
 /**
  * Write data into ring buffer (called when USB receives pixel data)
- * Handles wrap-around automatically
+ * Data should only be requested when enough space is available
  *
  * @param data: pointer to pixel data
  * @param len: number of bytes to write
- * @return: number of bytes actually written (may be less if buffer full)
+ *
+ *
  */
-static uint16_t RingBuffer_Write(const uint8_t* data, uint16_t len) {
-    uint16_t written = 0;
+void RingBuffer_Write( uint8_t* data, uint16_t len) {
 
-    for (uint16_t i = 0; i < len; i++) {
-        // Check if buffer is full
-        if (ring_buffer.available_bytes >= RING_BUFFER_SIZE) {
-            break;  // Buffer full
-        }
+	ring_buffer.available_bytes += len;
+	if (len > RING_BUFFER_SIZE - ring_buffer.write_pos) {
+		uint16_t space_left = RING_BUFFER_SIZE - ring_buffer.write_pos;
+		memcpy(&ring_buffer.data[ring_buffer.write_pos], data, space_left); //copy to end
+	    ring_buffer.write_pos = 0; //wrap around
+	    uint16_t remaining = len - space_left; //remaining after wrap
+	    memcpy(&ring_buffer.data[ring_buffer.write_pos], &data[space_left], remaining);
+		//copy remaining after wrap
+		ring_buffer.write_pos += remaining;
 
-        // Write byte at write position
-        ring_buffer.data[ring_buffer.write_pos] = data[i];
+	}
+	else{
+		memcpy(&ring_buffer.data[ring_buffer.write_pos], data, len);
+		ring_buffer.write_pos += len;
+		frame_manager.received_bytes += len;
+	}
 
-        // Advance write position with wrap-around
-        ring_buffer.write_pos++;
-        if (ring_buffer.write_pos >= RING_BUFFER_SIZE) {
-            ring_buffer.write_pos = 0;  // Wrap to beginning
-        }
-
-        // Increment available byte counter
-        ring_buffer.available_bytes++;
-        written++;
-    }
-
-    return written;
 }
 
 
@@ -105,41 +77,22 @@ static uint16_t RingBuffer_Write(const uint8_t* data, uint16_t len) {
  * Does NOT advance read pointer - call RingBuffer_ConsumeLine() after reading
  *
  * @param output: buffer to copy line into (must be LINE_WIDTH bytes)
- * @return: true if line was available, false if not enough data
+ *
  */
-static bool RingBuffer_ReadLine(uint8_t* output) {
-    // Check if we have a full line available
-    if (ring_buffer.available_bytes < LINE_WIDTH) {
-        return false;  // Not enough data
-    }
+void RingBuffer_Read(uint8_t *output) {
+	if (ring_buffer.available_bytes < ITEM_SIZE) {
+		return; // Not enough data
+	}
 
-    // Copy line data, handling wrap-around
-    for (uint16_t i = 0; i < LINE_WIDTH; i++) {
-        uint16_t read_index = (ring_buffer.read_pos + i) % RING_BUFFER_SIZE;
-        output[i] = ring_buffer.data[read_index];
-    }
-
-    return true;
-}
-
-/**
- * Advance read pointer after successfully reading a line
- * Call this only after RingBuffer_ReadLine() returns true
- */
-static void RingBuffer_ConsumeLine(void) {
-    // Advance read position by one line
-    ring_buffer.read_pos += LINE_WIDTH;
-    if (ring_buffer.read_pos >= RING_BUFFER_SIZE) {
-        ring_buffer.read_pos -= RING_BUFFER_SIZE;  // Wrap around
-    }
-
-    // Decrease available bytes
-    ring_buffer.available_bytes -= LINE_WIDTH;
-
-
-    // After consuming, we might need more data
-    CheckAndRequestData();
-
+	fastCopy160(output, &ring_buffer.data[ring_buffer.read_pos]);
+	ring_buffer.available_bytes -= ITEM_SIZE;
+	if (ring_buffer.read_pos + ITEM_SIZE >= RING_BUFFER_SIZE) {
+		ring_buffer.read_pos = 0; //wrap around
+	}
+	else{
+		ring_buffer.read_pos += ITEM_SIZE;
+	}
+	frame_manager.processed_bytes += ITEM_SIZE;
 }
 
 
@@ -152,95 +105,39 @@ static void RingBuffer_ConsumeLine(void) {
  * @param buf: received data buffer
  * @param len: number of bytes received
  */
-void USB_ProcessReceivedData(uint8_t* buf, uint32_t len) {
-    for (uint32_t i = 0; i < len; i++) {
-        uint8_t byte = buf[i];
+void USB_ProcessReceivedData(uint8_t *buf, uint32_t len) {
+    uint8_t byte = buf[0];
 
-        if (byte == CMD_FRAME_START) {
-            // New frame starting
-            ring_buffer.write_pos = 0;
-            ring_buffer.read_pos = 0;
-            ring_buffer.available_bytes = 0;
-            ring_buffer.request_pending = false;
+	if (len == 1) { // Command byte
 
-            frame_manager.state = FRAME_STATE_RECEIVING;
-            // DON'T reset current_display_line - let VGA continue naturally
-            frame_manager.line_was_read = false;  // Reset read flag - important!
-            frame_manager.received_bytes = 0;
+		if (byte == CMD_DATA_CHUNK) {
+			// Data chunk header - next bytes are pixel data
+			frame_manager.state = FRAME_STATE_RECEIVING;
+		} else if (byte == CMD_FRAME_END) {
+			// Frame complete
+			frame_manager.state = FRAME_STATE_COMPLETE;
+			frame_manager.frame_counter++;
+			frame_manager.processed_bytes = 0;
+			frame_manager.received_bytes = 0;
+			ring_buffer.available_bytes = 0;
+			ring_buffer.write_pos = 0;
+			ring_buffer.read_pos = 0;
 
-        } else if (byte == CMD_DATA_CHUNK) {
-            // Data chunk header
-            ring_buffer.request_pending = false;
 
-        } else if (byte == CMD_FRAME_END) {
-            // Frame complete
-            frame_manager.state = FRAME_STATE_COMPLETE;
-            frame_manager.frame_counter++;
+		}
+	} else if (frame_manager.state == FRAME_STATE_RECEIVING) {
+		// Pixel data
+		RingBuffer_Write(buf, len);
 
-        } else {
-            // Pixel data
-            if (frame_manager.state == FRAME_STATE_RECEIVING) {
-                uint16_t written = RingBuffer_Write(&byte, 1);
-                if (written > 0) {
-                    frame_manager.received_bytes++;
-                }
-            }
-        }
-    }
-
-    // Check if we need more data
-    CheckAndRequestData();
+	}
 }
 
 
-/**
- * Get a line of image data for VGA display
- * Call this from PrepareLineBuffer() in VGA.c
- *
- * @param line_number: which line of the image to retrieve (0-119)
- * @param output_buffer: buffer to copy line into (must be LINE_WIDTH bytes)
- * @return: true if line was retrieved, false if no data (show black)
- */
-bool USB_GetLine(uint8_t line_number, uint8_t* output_buffer) {
-    if (frame_manager.state == FRAME_STATE_IDLE) {
-        memset(output_buffer, 0x00, LINE_WIDTH);
-        return false;
-    }
-
-    // Check if we've moved to a different line
-    if (line_number != frame_manager.current_display_line) {
-        // Moving to a new line
-
-        // ONLY consume if we successfully read the previous line
-        // This prevents consuming data from frames we never read
-        if (frame_manager.line_was_read) {
-            RingBuffer_ConsumeLine();
-        }
-
-        // Update to new line and reset read flag
-        frame_manager.current_display_line = line_number;
-        frame_manager.line_was_read = false;
-    }
-
-    // Try to read the current line
-    if (RingBuffer_ReadLine(output_buffer)) {
-        // Successfully read - mark that we read this line
-        frame_manager.line_was_read = true;
-        return true;
-    }
-
-    // No data available
-    memset(output_buffer, 0x00, LINE_WIDTH);
-    return false;
+void RequestChunk(){
+	if (ring_buffer.available_bytes <= (160*15)){
+		uint8_t cmd = CMD_REQUEST_DATA;
+		SendCommands(cmd);
+	}
 }
-
-/**
- * Get number of complete lines available in buffer
- * Useful for debugging
- */
-uint16_t USB_GetAvailableLines(void) {
-    return ring_buffer.available_bytes / LINE_WIDTH;
-}
-
 
 
